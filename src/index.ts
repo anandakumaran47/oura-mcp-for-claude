@@ -11,7 +11,6 @@ import { OuraClient } from "./oura/client";
 import { OuraTokenError, refreshTokens } from "./oura/tokens";
 import { isProps, type Props } from "./props";
 import { RateLimitedError, registerTools } from "./tools";
-import { collectGlucose, registerGlucoseTools } from "./libre";
 import { env as workerEnv } from "cloudflare:workers";
 
 function currentProps(): Props {
@@ -27,25 +26,16 @@ function createServer(): McpServer {
 	const server = new McpServer(
 		{ name: "oura-mcp-for-claude", version: VERSION },
 		{
-			instructions: `Read-only access to the user's own Oura Ring data and FreeStyle Libre glucose (via LibreLinkUp). All dates are calendar days (YYYY-MM-DD) in ${timeZone}. Each tool defaults to the last 7 days and accepts at most 90 days per call.`,
+			instructions: `Read-only access to the user's own Oura Ring data. All dates are calendar days (YYYY-MM-DD) in ${timeZone}. Each tool defaults to the last 7 days and accepts at most 90 days per call.`,
 		},
 	);
-	const checkRateLimit = async () => {
-		const { success } = await workerEnv.TOOL_RATE_LIMITER.limit({ key: currentProps().connectionId });
-		if (!success) throw new RateLimitedError("Too many requests from this connection. Wait a minute and try again.");
-	};
 	registerTools(server, {
 		timeZone,
 		getClient: () => new OuraClient(currentProps().ouraAccessToken),
-		checkRateLimit,
-	});
-	registerGlucoseTools(server, {
-		timeZone,
-		env: workerEnv as any,
-		checkAuth() {
-			currentProps();
+		async checkRateLimit() {
+			const { success } = await workerEnv.TOOL_RATE_LIMITER.limit({ key: currentProps().connectionId });
+			if (!success) throw new RateLimitedError("Too many Oura requests from this connection. Wait a minute and try again.");
 		},
-		checkRateLimit,
 	});
 	return server;
 }
@@ -141,11 +131,5 @@ function getProvider(env: Env, request: Request): OAuthProvider<Env> {
 export default {
 	fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
 		return getProvider(env, request).fetch(request, env, ctx);
-	},
-	/** Every 5 minutes (wrangler.jsonc "triggers"): collect new Libre readings from LibreLinkUp. */
-	scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): void {
-		const e = env as any;
-		if (!e.LIBRE_EMAIL || !e.LIBRE_PASSWORD) return;
-		ctx.waitUntil(collectGlucose(e).catch(() => {}));
 	},
 } satisfies ExportedHandler<Env>;
